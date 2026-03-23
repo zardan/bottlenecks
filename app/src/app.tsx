@@ -1,243 +1,356 @@
-import { useMemo, useState } from 'preact/hooks'
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
+import maplibregl from 'maplibre-gl'
+import 'maplibre-gl/dist/maplibre-gl.css'
+import { ArcLayer, GeoJsonLayer, TextLayer } from '@deck.gl/layers'
+import { MapboxOverlay } from '@deck.gl/mapbox'
+import type { Color, PickingInfo } from '@deck.gl/core'
+import { FLOW_STEPS, INTERCONNECTORS, ZONE_LABELS, ZONES_GEOJSON } from './grid-data'
+import type { ZoneFeatureProperties } from './grid-data'
 import './app.css'
 
-type Zone = 'SE1' | 'SE2' | 'SE3' | 'SE4'
-type DataMode = 'live' | 'mock'
-
-type SeriesPoint = {
-  timestamp: string
-  value: number
+type FlowPoint = {
+  id: string
+  from: string
+  to: string
+  fromPosition: [number, number]
+  toPosition: [number, number]
+  capacityMw: number
+  flowMw: number
+  utilization: number
 }
 
-type DashboardData = {
-  zone: Zone
-  mode: DataMode
-  pricePoints: SeriesPoint[]
-  scbProductionGwh: number | null
-  scbConsumptionGwh: number | null
-  warnings: string[]
-}
-
-const ZONE_TO_EIC: Record<Zone, string> = {
-  SE1: '10Y1001A1001A44P',
-  SE2: '10Y1001A1001A45N',
-  SE3: '10Y1001A1001A46L',
-  SE4: '10Y1001A1001A47J',
-}
-
-const TODAY = new Date()
-const START_UTC = formatEntsoeDate(new Date(Date.UTC(TODAY.getUTCFullYear(), TODAY.getUTCMonth(), TODAY.getUTCDate() - 1)))
-const END_UTC = formatEntsoeDate(new Date(Date.UTC(TODAY.getUTCFullYear(), TODAY.getUTCMonth(), TODAY.getUTCDate() + 1)))
-
-function formatEntsoeDate(value: Date): string {
-  const year = value.getUTCFullYear()
-  const month = String(value.getUTCMonth() + 1).padStart(2, '0')
-  const day = String(value.getUTCDate()).padStart(2, '0')
-  return `${year}${month}${day}0000`
-}
-
-function buildMockData(zone: Zone): DashboardData {
-  const base = zone === 'SE1' ? 38 : zone === 'SE2' ? 42 : zone === 'SE3' ? 58 : 64
-  const now = Date.now()
-  const pricePoints = Array.from({ length: 8 }).map((_, idx) => ({
-    timestamp: new Date(now - (7 - idx) * 15 * 60 * 1000).toISOString(),
-    value: Number((base + Math.sin(idx) * 8 + idx).toFixed(2)),
-  }))
-
-  return {
-    zone,
-    mode: 'mock',
-    pricePoints,
-    scbProductionGwh: 5000 + (base - 30) * 10,
-    scbConsumptionGwh: 3200 + (base - 30) * 11,
-    warnings: ['Using mock data fallback while a live source is unavailable.'],
-  }
-}
-
-function parseEntsoeResponse(text: string): SeriesPoint[] {
-  // API can return XML wrapped in browser-rendered text, so we parse point blocks defensively.
-  const matches = [...text.matchAll(/<Point>[\s\S]*?<position>(\d+)<\/position>[\s\S]*?<price\.amount>([-\d.]+)<\/price\.amount>[\s\S]*?<\/Point>/g)]
-  const now = Date.now()
-
-  return matches.slice(0, 16).map((match, idx) => ({
-    timestamp: new Date(now - (16 - idx) * 15 * 60 * 1000).toISOString(),
-    value: Number(match[2]),
-  }))
-}
-
-async function fetchEntsoePrices(zone: Zone): Promise<SeriesPoint[]> {
-  const token = import.meta.env.VITE_ENTSOE_API_TOKEN as string | undefined
-  if (!token) {
-    throw new Error('Missing VITE_ENTSOE_API_TOKEN in local environment.')
-  }
-
-  const eic = ZONE_TO_EIC[zone]
-  const params = new URLSearchParams({
-    securityToken: token,
-    documentType: 'A44',
-    in_Domain: eic,
-    out_Domain: eic,
-    periodStart: START_UTC,
-    periodEnd: END_UTC,
-  })
-
-  const response = await fetch(`/entsoe-api/api?${params.toString()}`)
-  if (!response.ok) {
-    throw new Error(`ENTSO-E request failed with status ${response.status}.`)
-  }
-
-  const text = await response.text()
-  const points = parseEntsoeResponse(text)
-  if (points.length === 0) {
-    throw new Error('ENTSO-E response did not include price points.')
-  }
-  return points
-}
-
-async function fetchScbLatestMonthly(zone: Zone): Promise<{ production: number | null; consumption: number | null }> {
-  const response = await fetch('/scb-api/api/v2/tables/TAB78/data?lang=en&outputFormat=json-stat2')
-  if (!response.ok) {
-    throw new Error(`SCB request failed with status ${response.status}.`)
-  }
-
-  const body = (await response.json()) as {
-    value: number[]
-    dimension: {
-      ProdAnv: { category: { index: Record<string, number> } }
-      Elomrade: { category: { index: Record<Zone, number> } }
+type HoverInfo =
+  | {
+      kind: 'zone'
+      x: number
+      y: number
+  zone: ZoneFeatureProperties
     }
-    size: [number, number, number, number]
-  }
-
-  const metricIndex = body.dimension.ProdAnv.category.index
-  const zoneIndex = body.dimension.Elomrade.category.index[zone]
-  const zoneCount = body.size[3]
-
-  const at = (prodKey: string): number | null => {
-    const prodIdx = metricIndex[prodKey]
-    if (prodIdx === undefined || zoneIndex === undefined) {
-      return null
+  | {
+      kind: 'flow'
+      x: number
+      y: number
+      line: FlowPoint
     }
-    const flattenedIndex = prodIdx * zoneCount + zoneIndex
-    return body.value[flattenedIndex] ?? null
-  }
+  | null
 
-  return {
-    production: at('Produktion'),
-    consumption: at('Användning'),
+const BASE_MAP_STYLE: maplibregl.StyleSpecification = {
+  version: 8,
+  sources: {
+    osm: {
+      type: 'raster',
+      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+      tileSize: 256,
+      attribution: '&copy; OpenStreetMap contributors',
+    },
+  },
+  layers: [{ id: 'osm-tiles', type: 'raster', source: 'osm' }],
+}
+
+function flowColor(utilization: number): [number, number, number, number] {
+  if (utilization >= 0.9) {
+    return [220, 38, 38, 235]
   }
+  if (utilization >= 0.7) {
+    return [245, 158, 11, 220]
+  }
+  return [14, 116, 144, 205]
 }
 
 export function App() {
-  const [zone, setZone] = useState<Zone>('SE3')
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [data, setData] = useState<DashboardData>(() => buildMockData('SE3'))
+  const mapContainerRef = useRef<HTMLDivElement | null>(null)
+  const mapRef = useRef<maplibregl.Map | null>(null)
+  const overlayRef = useRef<MapboxOverlay | null>(null)
+  const [selectedZone, setSelectedZone] = useState<string>('SE3')
+  const [stepIndex, setStepIndex] = useState<number>(2)
+  const [hoverInfo, setHoverInfo] = useState<HoverInfo>(null)
 
-  const latestPrice = useMemo(() => data.pricePoints[data.pricePoints.length - 1]?.value ?? null, [data.pricePoints])
+  const activeFlows = useMemo<FlowPoint[]>(() => {
+    return INTERCONNECTORS.map((line) => {
+      const flowMw = line.flowByStepMw[stepIndex]
+      const utilization = Math.min(1, Math.abs(flowMw) / line.capacityMw)
+      return {
+        id: line.id,
+        from: line.from,
+        to: line.to,
+        fromPosition: line.fromPosition,
+        toPosition: line.toPosition,
+        capacityMw: line.capacityMw,
+        flowMw,
+        utilization,
+      }
+    })
+  }, [stepIndex])
 
-  const loadData = async (nextZone: Zone) => {
-    setLoading(true)
-    setError(null)
-    try {
-      const [prices, scb] = await Promise.all([fetchEntsoePrices(nextZone), fetchScbLatestMonthly(nextZone)])
-      setData({
-        zone: nextZone,
-        mode: 'live',
-        pricePoints: prices,
-        scbProductionGwh: scb.production,
-        scbConsumptionGwh: scb.consumption,
-        warnings: [],
-      })
-    } catch (err) {
-      const fallback = buildMockData(nextZone)
-      setData(fallback)
-      setError(err instanceof Error ? err.message : 'Unexpected fetch error.')
-    } finally {
-      setLoading(false)
+  const selectedZoneStats = useMemo(() => {
+    const zone = ZONES_GEOJSON.features.find((feature) => feature.properties.id === selectedZone)?.properties
+    const connectedLines = activeFlows.filter((line) => line.from === selectedZone || line.to === selectedZone)
+    const netInterconnectorMw = connectedLines.reduce((sum, line) => {
+      if (line.from === selectedZone) {
+        return sum - line.flowMw
+      }
+      return sum + line.flowMw
+    }, 0)
+
+    return {
+      zone,
+      connectedCount: connectedLines.length,
+      netInterconnectorMw,
+      highestUtilization: connectedLines.reduce((max, line) => Math.max(max, line.utilization), 0),
     }
-  }
+  }, [activeFlows, selectedZone])
+
+  const layers = useMemo(() => {
+    return [
+      new GeoJsonLayer<ZoneFeatureProperties>({
+        id: 'zone-polygons',
+        data: ZONES_GEOJSON,
+        pickable: true,
+        stroked: true,
+        filled: true,
+        getLineColor: [85, 93, 110, 235],
+        lineWidthMinPixels: 1.5,
+        getFillColor: (feature): Color => {
+          const isSelected = feature.properties.id === selectedZone
+          if (feature.properties.kind === 'neighbor') {
+            const neighborColor: [number, number, number, number] = isSelected
+              ? [197, 207, 224, 210]
+              : [217, 223, 232, 165]
+            return neighborColor
+          }
+          const base = feature.properties.basePriceEurMwh
+          const intensity = Math.max(0, Math.min(1, (base - 40) / 40))
+          const red = Math.round(44 + intensity * 160)
+          const green = Math.round(182 - intensity * 95)
+          const blue = Math.round(184 - intensity * 75)
+          const swedenColor: [number, number, number, number] = isSelected
+            ? [red + 25, green + 18, blue + 8, 225]
+            : [red, green, blue, 170]
+          return swedenColor
+        },
+        onHover: (info: PickingInfo<GeoJSON.Feature<GeoJSON.Polygon, ZoneFeatureProperties>>) => {
+          if (info.object && info.x !== undefined && info.y !== undefined) {
+            setHoverInfo({
+              kind: 'zone',
+              x: info.x,
+              y: info.y,
+              zone: info.object.properties,
+            })
+            return
+          }
+          setHoverInfo((current) => (current?.kind === 'zone' ? null : current))
+        },
+        onClick: (info: PickingInfo<GeoJSON.Feature<GeoJSON.Polygon, ZoneFeatureProperties>>) => {
+          if (info.object) {
+            setSelectedZone(info.object.properties.id)
+          }
+        },
+      }),
+      new ArcLayer<FlowPoint>({
+        id: 'interconnector-flows',
+        data: activeFlows,
+        pickable: true,
+        getSourcePosition: (line) => (line.flowMw >= 0 ? line.fromPosition : line.toPosition),
+        getTargetPosition: (line) => (line.flowMw >= 0 ? line.toPosition : line.fromPosition),
+        getSourceColor: (line) => {
+          const emphasized = line.from === selectedZone || line.to === selectedZone
+          const [r, g, b, a] = flowColor(line.utilization)
+          return emphasized ? [r, g, b, a] : [r, g, b, 140]
+        },
+        getTargetColor: (line) => {
+          const emphasized = line.from === selectedZone || line.to === selectedZone
+          const [r, g, b, a] = flowColor(line.utilization)
+          return emphasized ? [r, g, b, a] : [r, g, b, 140]
+        },
+        getWidth: (line) => 2 + line.utilization * 9,
+        widthMinPixels: 2,
+        greatCircle: false,
+        onHover: (info: PickingInfo<FlowPoint>) => {
+          if (info.object && info.x !== undefined && info.y !== undefined) {
+            setHoverInfo({
+              kind: 'flow',
+              x: info.x,
+              y: info.y,
+              line: info.object,
+            })
+            return
+          }
+          setHoverInfo((current) => (current?.kind === 'flow' ? null : current))
+        },
+      }),
+      new TextLayer({
+        id: 'zone-labels',
+        data: ZONE_LABELS,
+        pickable: false,
+        getPosition: (label) => label.position,
+        getText: (label) => label.text,
+        getSize: 16,
+        getColor: [17, 24, 39, 250],
+        getTextAnchor: 'middle',
+        getAlignmentBaseline: 'center',
+        getPixelOffset: [0, 0],
+        outlineWidth: 2,
+        outlineColor: [245, 246, 250, 245],
+      }),
+    ]
+  }, [activeFlows, selectedZone])
+
+  useEffect(() => {
+    if (!mapContainerRef.current) {
+      return
+    }
+
+    if (!mapRef.current) {
+      const map = new maplibregl.Map({
+        container: mapContainerRef.current,
+        style: BASE_MAP_STYLE,
+        center: [18.0, 60.5],
+        zoom: 3.6,
+        minZoom: 3,
+        maxZoom: 7,
+        pitchWithRotate: false,
+        dragRotate: false,
+      })
+
+      map.addControl(new maplibregl.NavigationControl({ visualizePitch: false }), 'top-right')
+
+      const overlay = new MapboxOverlay({
+        interleaved: true,
+        layers,
+      })
+      map.addControl(overlay)
+
+      mapRef.current = map
+      overlayRef.current = overlay
+      return
+    }
+
+    overlayRef.current?.setProps({ layers })
+  }, [layers])
+
+  useEffect(() => {
+    return () => {
+      if (mapRef.current) {
+        mapRef.current.remove()
+        mapRef.current = null
+        overlayRef.current = null
+      }
+    }
+  }, [])
+
+  const tooltipStyle = hoverInfo
+    ? {
+        left: `${hoverInfo.x + 16}px`,
+        top: `${hoverInfo.y + 16}px`,
+      }
+    : undefined
 
   return (
-    <main class="container">
-      <header class="header">
-        <h1>Swedish bottleneck simulator (Phase 2 kickoff)</h1>
-        <p>
-          This first version verifies data adapters: ENTSO-E day-ahead prices + SCB monthly production/consumption.
-        </p>
-      </header>
+    <main class="layout">
+      <section class="map-shell">
+        <div class="hud">
+          <h1>Nordic Grid Bottlenecks</h1>
+          <p>Prototype map for bidding zones, cross-border flows, and congestion headroom.</p>
+          <label class="time-control" for="flow-step">
+            <span>Flow snapshot: {FLOW_STEPS[stepIndex]} UTC</span>
+            <input
+              id="flow-step"
+              type="range"
+              min={0}
+              max={FLOW_STEPS.length - 1}
+              step={1}
+              value={stepIndex}
+              onInput={(event) => setStepIndex(Number(event.currentTarget.value))}
+            />
+          </label>
+        </div>
 
-      <section class="controls">
-        <label for="zone">Bidding zone</label>
-        <select
-          id="zone"
-          value={zone}
-          onChange={(event) => {
-            const next = event.currentTarget.value as Zone
-            setZone(next)
-          }}
-        >
-          <option value="SE1">SE1</option>
-          <option value="SE2">SE2</option>
-          <option value="SE3">SE3</option>
-          <option value="SE4">SE4</option>
-        </select>
-        <button type="button" onClick={() => loadData(zone)} disabled={loading}>
-          {loading ? 'Loading...' : 'Fetch data'}
-        </button>
+        <div ref={mapContainerRef} class="map" />
+
+        {hoverInfo && (
+          <aside class="tooltip" style={tooltipStyle}>
+            {hoverInfo.kind === 'zone' ? (
+              <>
+                <strong>{hoverInfo.zone.name}</strong>
+                <span>Base price: {hoverInfo.zone.basePriceEurMwh} EUR/MWh</span>
+                <span>Net balance: {hoverInfo.zone.netBalanceMw} MW</span>
+              </>
+            ) : (
+              <>
+                <strong>
+                  {hoverInfo.line.flowMw >= 0 ? hoverInfo.line.from : hoverInfo.line.to} to{' '}
+                  {hoverInfo.line.flowMw >= 0 ? hoverInfo.line.to : hoverInfo.line.from}
+                </strong>
+                <span>Flow: {Math.abs(hoverInfo.line.flowMw)} MW</span>
+                <span>Capacity: {hoverInfo.line.capacityMw} MW</span>
+                <span>Utilization: {(hoverInfo.line.utilization * 100).toFixed(0)}%</span>
+              </>
+            )}
+          </aside>
+        )}
       </section>
 
-      <section class="status">
-        <div>
-          <strong>Zone:</strong> {data.zone}
-        </div>
-        <div>
-          <strong>Mode:</strong> {data.mode}
-        </div>
-        <div>
-          <strong>Latest price:</strong> {latestPrice !== null ? `${latestPrice} EUR/MWh` : 'n/a'}
-        </div>
-        <div>
-          <strong>SCB production:</strong> {data.scbProductionGwh ?? 'n/a'} GWh
-        </div>
-        <div>
-          <strong>SCB consumption:</strong> {data.scbConsumptionGwh ?? 'n/a'} GWh
-        </div>
-      </section>
-
-      {error && (
-        <p class="error">
-          Live fetch failed: {error}
-        </p>
-      )}
-
-      {data.warnings.length > 0 && (
-        <ul class="warnings">
-          {data.warnings.map((warning) => (
-            <li key={warning}>{warning}</li>
+      <aside class="panel">
+        <h2>Selected zone</h2>
+        <div class="zone-picker" role="radiogroup" aria-label="Select bidding zone">
+          {['SE1', 'SE2', 'SE3', 'SE4'].map((id) => (
+            <button
+              type="button"
+              key={id}
+              class={selectedZone === id ? 'active' : ''}
+              onClick={() => setSelectedZone(id)}
+            >
+              {id}
+            </button>
           ))}
-        </ul>
-      )}
+        </div>
 
-      <section class="series">
-        <h2>Recent price points</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Timestamp (UTC)</th>
-              <th>EUR/MWh</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.pricePoints.map((point) => (
-              <tr key={point.timestamp}>
-                <td>{point.timestamp}</td>
-                <td>{point.value}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
+        <dl class="stats">
+          <div>
+            <dt>Price level</dt>
+            <dd>{selectedZoneStats.zone?.basePriceEurMwh ?? 'n/a'} EUR/MWh</dd>
+          </div>
+          <div>
+            <dt>Local net balance</dt>
+            <dd>{selectedZoneStats.zone?.netBalanceMw ?? 'n/a'} MW</dd>
+          </div>
+          <div>
+            <dt>Connected lines</dt>
+            <dd>{selectedZoneStats.connectedCount}</dd>
+          </div>
+          <div>
+            <dt>Interconnector net import</dt>
+            <dd>{selectedZoneStats.netInterconnectorMw.toFixed(0)} MW</dd>
+          </div>
+          <div>
+            <dt>Highest utilization</dt>
+            <dd>{(selectedZoneStats.highestUtilization * 100).toFixed(0)}%</dd>
+          </div>
+        </dl>
+
+        <section class="legend">
+          <h3>Flow utilization</h3>
+          <p>
+            Arc width follows MW flow. Color follows usage ratio against line capacity.
+          </p>
+          <ul>
+            <li>
+              <span class="chip low" />
+              <span>Below 70%</span>
+            </li>
+            <li>
+              <span class="chip medium" />
+              <span>70% to 89%</span>
+            </li>
+            <li>
+              <span class="chip high" />
+              <span>90% and above</span>
+            </li>
+          </ul>
+        </section>
+
+        <p class="disclaimer">Prototype geometry for UX and data-flow testing. Replace with official bidding-zone boundaries in production.</p>
+      </aside>
     </main>
   )
 }
