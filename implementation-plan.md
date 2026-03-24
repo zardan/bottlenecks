@@ -54,18 +54,12 @@ This plan is updated as work progresses.
 
 ## Proposed MVP data baseline (public-first)
 
-- **Production/consumption:** SCB `TAB78` via PxWeb API v2 (monthly).
-- **Prices:** ENTSO-E day-ahead zonal prices (`SE1`-`SE4`) via Transparency API once token is enabled.
-- **Bottleneck inputs:** Start with configurable synthetic transfer capacities per interconnector, then replace with measured flow/capacity data when a stable public source is confirmed.
+- **Prices:** ENTSO-E day-ahead zonal prices (`SE1`-`SE4`) via Transparency API (A44 document type).
+- **Cross-border flows:** ENTSO-E physical flows (A11 document type) for all Swedish interconnectors.
+- **Bottleneck inputs:** Start with configurable synthetic transfer capacities per interconnector, then replace with measured capacity data (A31/A26) when ready.
+- **Production/consumption:** Dropped from MVP scope. SCB `TAB78` was investigated and confirmed working, but monthly granularity was too coarse for the real-time map approach. May revisit later if needed.
 
 ## Licensing and usage constraints (Phase 1 outcome)
-
-### SCB PxWeb API
-- **License baseline:** SCB open data is published under CC0 according to SCB open-data terms.
-- **Practical constraints:** API rate and extraction limits apply; PxWeb v2 documents 30 calls per 10 seconds and up to 150,000 data cells per request.
-- **References:**
-  - `https://scb.se/om-scb/om-scb.se-och-anvandningsvillkor/oppna-data-api`
-  - `https://www.scb.se/en/services/open-data-api/pxwebapi/`
 
 ### ENTSO-E Transparency
 - **Data governance:** Official EU-regulated transparency platform; data publication and extraction framework documented by ENTSO-E.
@@ -83,32 +77,41 @@ This plan is updated as work progresses.
 
 ## MVP data contract (frozen for implementation)
 
-The app will normalize all inputs into one schema:
+The app consumes ENTSO-E data only:
 
 ```ts
 type Zone = "SE1" | "SE2" | "SE3" | "SE4";
 
-type DataPoint = {
-  timestamp: string;           // ISO-8601 start timestamp in UTC
-  resolution: "PT60M" | "P1M"; // hourly or monthly
+// Day-ahead prices (A44)
+type EntsoePricePoint = {
   zone: Zone;
-  metric:
-    | "price_day_ahead_eur_mwh"
-    | "production_total_gwh"
-    | "consumption_total_gwh";
-  value: number;
-  unit: "EUR/MWh" | "GWh";
-  source: "ENTSOE" | "SCB";
-  sourceSeriesId: string;      // e.g. ENTSOE document+domain key or SCB table code
-  quality: "measured" | "estimated" | "model_based";
+  deliveryStartUtc: string;
+  deliveryEndUtc: string;
+  deliveryHourCet: number;
+  marketDateCet: string;
+  deliveryPeriodCet: string;
+  priceEurMwh: number;
+  resolution: string;
+};
+
+// Physical cross-border flows (A11)
+type EntsoeCrossBorderFlowPoint = {
+  linkId: string;
+  from: string;
+  to: string;
+  deliveryStartUtc: string;
+  deliveryEndUtc: string;
+  marketDateCet: string;
+  deliveryPeriodCet: string;
+  flowMw: number;
+  resolution: string;
 };
 ```
 
 ### Mapping rules
-- `SCB TAB78 / Produktion` -> `production_total_gwh`, `resolution: "P1M"`, `quality: "measured"`.
-- `SCB TAB78 / Användning` -> `consumption_total_gwh`, `resolution: "P1M"`, `quality: "model_based"`.
-- `ENTSO-E day-ahead price by bidding zone` -> `price_day_ahead_eur_mwh`, `resolution: "PT60M"` (or platform resolution if changed), `quality: "measured"`.
-- Store all times in UTC internally; convert to local display timezone in UI.
+- `ENTSO-E A44 day-ahead price by bidding zone` -> zonal prices in EUR/MWh per delivery period.
+- `ENTSO-E A11 physical cross-border flows` -> net flow in MW per interconnector per delivery period.
+- All times stored in UTC internally; converted to CET/CEST for display.
 
 ## Phase 2 - Lightweight app architecture (completed)
 - [x] Stack: `Vite + Preact + TypeScript`.
@@ -160,12 +163,8 @@ type DataPoint = {
 
 Verification run completed before starting Phase 2:
 
-- **SCB (`TAB78`)**: fetch works.
-  - `https://statistikdatabasen.scb.se/api/v2/tables/TAB78/metadata?lang=en` -> success
-  - `https://statistikdatabasen.scb.se/api/v2/tables/TAB78/data?lang=en&outputFormat=json-stat2` -> success with data payload
-- **ENTSO-E day-ahead API**: fetch requires authorization.
-  - `https://web-api.tp.entsoe.eu/api?...` (without token) -> `401 Unauthorized`
-
-Decision gate before Phase 2 implementation:
-- Proceed with SCB adapter immediately.
+- **ENTSO-E day-ahead API**: working with token via Vite proxy.
+  - Day-ahead prices (A44) for SE1–SE4: fetched successfully.
+  - Physical cross-border flows (A11) for 7 links: fetched successfully.
+- **SCB (`TAB78`)**: confirmed working but dropped from scope (monthly granularity too coarse for real-time map).
 - Add ENTSO-E adapter skeleton behind token configuration (`ENTSOE_API_TOKEN`), and activate real fetching once token is available.
