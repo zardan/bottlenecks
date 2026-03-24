@@ -110,23 +110,51 @@ type DataPoint = {
 - `ENTSO-E day-ahead price by bidding zone` -> `price_day_ahead_eur_mwh`, `resolution: "PT60M"` (or platform resolution if changed), `quality: "measured"`.
 - Store all times in UTC internally; convert to local display timezone in UI.
 
-## Phase 2 - Lightweight app architecture (planned)
+## Phase 2 - Lightweight app architecture (completed)
 - [x] Stack: `Vite + Preact + TypeScript`.
-- [ ] Charts: `uPlot` for time series.
-- [x] Data ingestion module with source adapters and quality flags (initial version).
+- [x] Map visualization: `MapLibre GL JS` + `deck.gl` (GeoJsonLayer, ArcLayer, TextLayer).
+- [x] ENTSO-E data ingestion: day-ahead prices (A44) and physical cross-border flows (A11) via proxy.
+- [x] Parallel API fetching with `Promise.allSettled` for prices + flows.
+- [x] Interactive time slider with arrow buttons and discrete tick marks.
+- [x] Bidding zone picker (SE1–SE4) with map highlight sync.
+- [x] Cross-border flow verification table.
+- [x] Zone price display panel.
+- [x] Responsive layout: controls section, status bar, map (2/3) + table (1/3).
+- [x] Codebase cleanup: types extracted to `types.ts`, constants hoisted to module scope.
+- [ ] Charts: `uPlot` for time series (deferred — map-first approach taken instead).
 - [ ] Optional tiny backend proxy only if needed for CORS/rate limits.
 
 ## Phase 3 - Simulation MVP (planned)
 - [ ] Four-zone model (`SE1`, `SE2`, `SE3`, `SE4`) with configurable transfer capacities.
+- [ ] Wire real ENTSO-E capacity data (A31/A26 document types) for utilization coloring.
+- [ ] Replace hand-drawn zone polygons with official ENTSO-E/TYNDP bidding-zone boundaries.
 - [ ] Simulate constrained transfer and show resulting zonal spreads.
 - [ ] Compare baseline data vs bottleneck scenario.
+- [ ] Code-split the JS bundle (currently ~1.8 MB, Vite warns about chunk size).
 
-## Next update target
+## Current app status (2026-03-24)
 
-Phase 2 next steps:
-1) replace the table preview with chart rendering (`uPlot`),
-2) split adapters into dedicated modules and add parsing tests,
-3) add first bottleneck simulation controls (capacity slider + scenario compare).
+### What works
+- Real ENTSO-E day-ahead prices for SE1–SE4 fetched and displayed.
+- Real ENTSO-E physical cross-border flows for 7 links (NO1↔SE3, NO3↔SE2, SE3↔FI, SE4↔DK2, SE4↔PL, SE4↔LT, SE4↔EE).
+- Interactive time slider navigates across all available delivery periods.
+- Map highlights the selected bidding zone (light blue fill, blue border).
+- Arc layer shows flow direction and magnitude.
+- Verification table lists all cross-border flows for the selected period.
+- Fetch status badges shown inline (no card wrappers).
+
+### Architecture
+- `app/src/app.tsx` — Main App component (map, controls, table, data fetching).
+- `app/src/types.ts` — Shared type definitions (FlowArc, HoverInfo, PriceState, FlowState).
+- `app/src/entsoe.ts` — ENTSO-E API fetching and XML parsing.
+- `app/src/grid-data.ts` — Static zone polygons, labels, and cross-border link definitions.
+- `app/src/app.css` — All styling (flex/grid layout, responsive breakpoints).
+
+### Known limitations
+- Zone polygons are hand-drawn approximations, not official boundaries.
+- Cross-border capacity data not yet wired (arcs show flow magnitude only, not utilization).
+- No time-series chart view yet.
+- JS bundle is ~1.8 MB (deck.gl + MapLibre are heavy; could benefit from code-splitting).
 
 ## Pre-Phase 2 fetch verification
 
