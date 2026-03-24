@@ -15,17 +15,15 @@ export type ZoneLabel = {
   text: string
 }
 
-export type Interconnector = {
+export type CrossBorderLink = {
   id: string
   from: string
   to: string
   fromPosition: [number, number]
   toPosition: [number, number]
-  capacityMw: number
-  flowByStepMw: [number, number, number, number]
+  fromDomain: string
+  toDomain: string
 }
-
-export const FLOW_STEPS = ['00:00', '06:00', '12:00', '18:00'] as const
 
 export const ZONES_GEOJSON: GeoJSON.FeatureCollection<GeoJSON.Polygon, ZoneFeatureProperties> = {
   type: 'FeatureCollection',
@@ -144,42 +142,15 @@ export const ZONE_LABELS: ZoneLabel[] = [
   { id: 'PL-label', zoneId: 'PL', position: [18.9, 53.0], text: 'PL' },
 ]
 
-export const INTERCONNECTORS: Interconnector[] = [
-  {
-    id: 'SE1-SE2',
-    from: 'SE1',
-    to: 'SE2',
-    fromPosition: [18.9, 66.0],
-    toPosition: [18.2, 62.9],
-    capacityMw: 3300,
-    flowByStepMw: [2100, 2300, 2600, 2200],
-  },
-  {
-    id: 'SE2-SE3',
-    from: 'SE2',
-    to: 'SE3',
-    fromPosition: [17.2, 60.7],
-    toPosition: [16.1, 58.6],
-    capacityMw: 7300,
-    flowByStepMw: [5200, 5700, 6100, 5600],
-  },
-  {
-    id: 'SE3-SE4',
-    from: 'SE3',
-    to: 'SE4',
-    fromPosition: [15.8, 56.9],
-    toPosition: [14.6, 55.7],
-    capacityMw: 5400,
-    flowByStepMw: [3600, 3900, 4100, 3700],
-  },
+export const CROSS_BORDER_LINKS: CrossBorderLink[] = [
   {
     id: 'NO1-SE3',
     from: 'NO1',
     to: 'SE3',
     fromPosition: [9.8, 58.6],
     toPosition: [13.1, 58.2],
-    capacityMw: 2100,
-    flowByStepMw: [900, 1200, 1500, 1000],
+    fromDomain: '10YNO-1--------2',
+    toDomain: '10Y1001A1001A46L',
   },
   {
     id: 'NO3-SE2',
@@ -187,8 +158,8 @@ export const INTERCONNECTORS: Interconnector[] = [
     to: 'SE2',
     fromPosition: [11.7, 62.0],
     toPosition: [14.4, 61.5],
-    capacityMw: 1800,
-    flowByStepMw: [600, 700, 1100, 850],
+    fromDomain: '10YNO-3--------J',
+    toDomain: '10Y1001A1001A45N',
   },
   {
     id: 'SE3-FI',
@@ -196,8 +167,8 @@ export const INTERCONNECTORS: Interconnector[] = [
     to: 'FI',
     fromPosition: [19.8, 59.9],
     toPosition: [23.2, 60.4],
-    capacityMw: 1200,
-    flowByStepMw: [-400, -350, 180, 260],
+    fromDomain: '10Y1001A1001A46L',
+    toDomain: '10YFI-1--------U',
   },
   {
     id: 'SE4-DK2',
@@ -205,8 +176,8 @@ export const INTERCONNECTORS: Interconnector[] = [
     to: 'DK2',
     fromPosition: [13.4, 55.1],
     toPosition: [11.8, 55.4],
-    capacityMw: 1700,
-    flowByStepMw: [800, 900, 1200, 950],
+    fromDomain: '10Y1001A1001A47J',
+    toDomain: '10YDK-2--------M',
   },
   {
     id: 'SE4-PL',
@@ -214,8 +185,8 @@ export const INTERCONNECTORS: Interconnector[] = [
     to: 'PL',
     fromPosition: [15.0, 54.8],
     toPosition: [16.8, 53.9],
-    capacityMw: 650,
-    flowByStepMw: [540, 590, 620, 600],
+    fromDomain: '10Y1001A1001A47J',
+    toDomain: '10YPL-AREA-----S',
   },
   {
     id: 'SE4-LT',
@@ -223,8 +194,8 @@ export const INTERCONNECTORS: Interconnector[] = [
     to: 'LT',
     fromPosition: [17.2, 55.0],
     toPosition: [21.5, 55.5],
-    capacityMw: 700,
-    flowByStepMw: [300, 340, 410, 360],
+    fromDomain: '10Y1001A1001A47J',
+    toDomain: '10YLT-1001A0008Q',
   },
   {
     id: 'SE4-EE',
@@ -232,7 +203,7 @@ export const INTERCONNECTORS: Interconnector[] = [
     to: 'EE',
     fromPosition: [18.0, 56.2],
     toPosition: [23.6, 58.0],
-    capacityMw: 1000,
-    flowByStepMw: [380, 450, 560, 420],
+    fromDomain: '10Y1001A1001A47J',
+    toDomain: '10Y1001A1001A39I',
   },
 ]
